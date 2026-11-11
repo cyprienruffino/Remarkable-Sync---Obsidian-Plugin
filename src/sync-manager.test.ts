@@ -57,10 +57,11 @@ function doc(
 }
 
 /** Stored-state fixture; only the fields under test vary. */
-function syncedInfo(entryHash?: string, path = "reMarkable/Notes.pdf") {
+function syncedInfo(entryHash?: string, name = "Notes") {
 	return {
 		version: 5,
-		path,
+		path: `reMarkable/_pdfs/${name}.pdf`,
+		notePath: `reMarkable/${name}.md`,
 		hash: "deadbeef",
 		syncedAt: "2026-01-01T00:00:00Z",
 		...(entryHash === undefined ? {} : { entryHash }),
@@ -253,7 +254,7 @@ test("sync re-processes an edited document and still skips an unchanged one", as
 	const { ops } = memoryFileOps();
 	const state = new SyncState();
 	state.syncedDocs["doc-1"] = syncedInfo("hash-before-edit");
-	state.syncedDocs["doc-2"] = syncedInfo("same-hash", "reMarkable/Ideas.pdf");
+	state.syncedDocs["doc-2"] = syncedInfo("same-hash", "Ideas");
 	const manager = new SyncManager("/vault", "reMarkable", ops, state);
 
 	// Both docs keep file count 5; only doc-1's hash changed. The failing
@@ -279,7 +280,7 @@ test("a successful sync persists the entry hash so the next run skips", async ()
 	const first = await manager.sync(client, { writeLog: false });
 	assert.equal(first.synced.length, 1);
 	assert.equal(first.errors.length, 0);
-	assert.ok(files.has("/vault/reMarkable/Notes.pdf"), "PDF written");
+	assert.ok(files.has("/vault/reMarkable/_pdfs/Notes.pdf"), "PDF written");
 
 	const state = JSON.parse(
 		files.get("/vault/reMarkable/.remarkable-sync-state.json")!
@@ -318,15 +319,15 @@ test("a renamed document moves its PDF instead of leaving a duplicate", async ()
 	await manager.sync(successClient([doc("doc-1", "Notes", 1, "hash-1")]), {
 		writeLog: false,
 	});
-	assert.ok(files.has("/vault/reMarkable/Notes.pdf"));
+	assert.ok(files.has("/vault/reMarkable/_pdfs/Notes.pdf"));
 
 	// Rename on the device: same content, new name and entry hash.
 	await manager.sync(successClient([doc("doc-1", "Meeting", 1, "hash-2")]), {
 		writeLog: false,
 	});
-	assert.ok(files.has("/vault/reMarkable/Meeting.pdf"), "new path written");
+	assert.ok(files.has("/vault/reMarkable/_pdfs/Meeting.pdf"), "new path written");
 	assert.ok(
-		!files.has("/vault/reMarkable/Notes.pdf"),
+		!files.has("/vault/reMarkable/_pdfs/Notes.pdf"),
 		"old path must be cleaned up"
 	);
 });
@@ -346,7 +347,7 @@ test("dry-run does not touch the sync state file", async () => {
 		false,
 		"dry-run must not write state"
 	);
-	assert.equal(files.has("/vault/reMarkable/Notes.pdf"), false);
+	assert.equal(files.has("/vault/reMarkable/_pdfs/Notes.pdf"), false);
 });
 
 test("an empty subfolder writes at the vault root without a leading slash", async () => {
@@ -407,4 +408,107 @@ test("sync skips documents inside excluded folders and their subfolders", async 
 
 	const attempted = results.errorDetails.map((e) => e.docId).sort();
 	assert.deepEqual(attempted, ["d-root", "d-work"]);
+});
+
+// --- Notes layout: one note per document embedding its PDF from the PDF folder ---
+
+test("sync writes the PDF under the PDF folder and a note embedding it", async () => {
+	const { ops, files } = memoryFileOps();
+	const manager = new SyncManager("/vault", "reMarkable", ops, new SyncState());
+	const work: DocumentMetadata = { ...doc("f-work", "Work"), docType: "CollectionType" };
+	const plan: DocumentMetadata = { ...doc("doc-1", "Plan", 1, "hash-1"), parent: "f-work" };
+
+	await manager.sync(successClient([work, plan]), { writeLog: false });
+
+	assert.ok(files.has("/vault/reMarkable/_pdfs/Work/Plan.pdf"), "PDF in the PDF folder");
+	assert.equal(
+		files.get("/vault/reMarkable/Work/Plan.md"),
+		"![[reMarkable/_pdfs/Work/Plan.pdf]]\n"
+	);
+});
+
+test("a re-synced document keeps the user's edits to its note", async () => {
+	const { ops, files } = memoryFileOps();
+	const manager = new SyncManager("/vault", "reMarkable", ops, new SyncState());
+	await manager.sync(successClient([doc("doc-1", "Notes", 1, "hash-1")]), {
+		writeLog: false,
+	});
+	const edited = "![[reMarkable/_pdfs/Notes.pdf]]\n\nMy summary\n";
+	files.set("/vault/reMarkable/Notes.md", edited);
+
+	await manager.sync(successClient([doc("doc-1", "Notes", 1, "hash-2")]), {
+		writeLog: false,
+	});
+
+	assert.equal(files.get("/vault/reMarkable/Notes.md"), edited);
+});
+
+test("a renamed document moves its note with the user's edits and repoints the embed", async () => {
+	const { ops, files } = memoryFileOps();
+	const manager = new SyncManager("/vault", "reMarkable", ops, new SyncState());
+	await manager.sync(successClient([doc("doc-1", "Notes", 1, "hash-1")]), {
+		writeLog: false,
+	});
+	files.set("/vault/reMarkable/Notes.md", "![[reMarkable/_pdfs/Notes.pdf]]\n\nMy summary\n");
+
+	await manager.sync(successClient([doc("doc-1", "Meeting", 1, "hash-2")]), {
+		writeLog: false,
+	});
+
+	assert.equal(files.has("/vault/reMarkable/Notes.md"), false, "old note removed");
+	assert.equal(
+		files.get("/vault/reMarkable/Meeting.md"),
+		"![[reMarkable/_pdfs/Meeting.pdf]]\n\nMy summary\n"
+	);
+});
+
+test("a PDF synced before notes existed moves into the PDF folder on the next sync", async () => {
+	const { ops, files } = memoryFileOps();
+	files.set("/vault/reMarkable/Notes.pdf", "<binary:1>");
+	const state = new SyncState();
+	const { notePath: _, ...preNotes } = syncedInfo("hash-1");
+	state.syncedDocs["doc-1"] = { ...preNotes, path: "reMarkable/Notes.pdf" };
+	const manager = new SyncManager("/vault", "reMarkable", ops, state);
+
+	// Unchanged entry hash: only the layout change forces the sync.
+	const results = await manager.sync(
+		successClient([doc("doc-1", "Notes", 5, "hash-1")]),
+		{ writeLog: false }
+	);
+
+	assert.equal(results.synced.length, 1);
+	assert.equal(files.has("/vault/reMarkable/Notes.pdf"), false, "old PDF removed");
+	assert.ok(files.has("/vault/reMarkable/_pdfs/Notes.pdf"));
+	assert.ok(files.has("/vault/reMarkable/Notes.md"));
+});
+
+test("changing the PDF folder moves the PDFs and repoints existing notes", async () => {
+	const { ops, files } = memoryFileOps();
+	const manager = new SyncManager("/vault", "reMarkable", ops, new SyncState());
+	const client = successClient([doc("doc-1", "Notes", 1, "hash-1")]);
+	await manager.sync(client, { writeLog: false });
+
+	await manager.sync(client, { writeLog: false, pdfFolder: "attachments" });
+
+	assert.equal(files.has("/vault/reMarkable/_pdfs/Notes.pdf"), false);
+	assert.ok(files.has("/vault/reMarkable/attachments/Notes.pdf"));
+	assert.equal(
+		files.get("/vault/reMarkable/Notes.md"),
+		"![[reMarkable/attachments/Notes.pdf]]\n"
+	);
+});
+
+test("characters that break wikilinks are replaced in synced paths", async () => {
+	const { ops, files } = memoryFileOps();
+	const manager = new SyncManager("/vault", "reMarkable", ops, new SyncState());
+
+	await manager.sync(successClient([doc("doc-1", "Q#1 [draft]", 1, "hash-1")]), {
+		writeLog: false,
+	});
+
+	assert.ok(files.has("/vault/reMarkable/_pdfs/Q_1 _draft_.pdf"));
+	assert.equal(
+		files.get("/vault/reMarkable/Q_1 _draft_.md"),
+		"![[reMarkable/_pdfs/Q_1 _draft_.pdf]]\n"
+	);
 });

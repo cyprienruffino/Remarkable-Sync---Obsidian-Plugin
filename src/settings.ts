@@ -1,9 +1,10 @@
 import { App, Notice, PluginSettingTab, Setting } from "obsidian";
 import type RemarkableSyncPlugin from "./main";
-import { SYNC_INTERVALS, AUTH_URL, DEFAULT_SUBFOLDER, SYNC_LOG_FILENAME } from "./constants";
+import { SYNC_INTERVALS, AUTH_URL, DEFAULT_PDF_FOLDER, DEFAULT_SUBFOLDER, SYNC_LOG_FILENAME } from "./constants";
 
 export interface RemarkableSyncSettings {
 	subfolder: string;
+	pdfFolder: string;
 	syncIntervalLabel: string;
 	folderFilter: string;
 	excludedFolders: string;
@@ -14,6 +15,7 @@ export interface RemarkableSyncSettings {
 
 export const DEFAULT_SETTINGS: RemarkableSyncSettings = {
 	subfolder: DEFAULT_SUBFOLDER,
+	pdfFolder: DEFAULT_PDF_FOLDER,
 	syncIntervalLabel: "Manual only",
 	folderFilter: "",
 	excludedFolders: "",
@@ -118,6 +120,19 @@ export class RemarkableSyncSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.subfolder)
 					.onChange(async (value) => {
 						this.plugin.settings.subfolder = value || DEFAULT_SUBFOLDER;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("PDF folder")
+			.setDesc("Folder inside the subfolder where the PDFs are stored. Each document gets a note in the subfolder that embeds its PDF. Add this folder to Files and links > Excluded files to keep the PDFs out of search.")
+			.addText((text) =>
+				text
+					.setPlaceholder(DEFAULT_PDF_FOLDER)
+					.setValue(this.plugin.settings.pdfFolder)
+					.onChange(async (value) => {
+						this.plugin.settings.pdfFolder = value || DEFAULT_PDF_FOLDER;
 						await this.plugin.saveSettings();
 					})
 			);

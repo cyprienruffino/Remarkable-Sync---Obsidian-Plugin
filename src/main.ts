@@ -256,6 +256,7 @@ export default class RemarkableSyncPlugin extends Plugin {
 			const results = await manager.sync(this.client, {
 				folderFilter: this.settings.folderFilter || undefined,
 				excludedFolders: parseFolderList(this.settings.excludedFolders),
+				pdfFolder: this.settings.pdfFolder,
 				force,
 				writeLog: this.settings.writeSyncLog,
 				logFileName: SYNC_LOG_FILENAME,

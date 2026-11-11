@@ -1,5 +1,9 @@
 export const DEFAULT_SUBFOLDER = "reMarkable";
 
+// Folder inside the sync subfolder holding the PDFs the notes embed. Not a
+// dot-folder: Obsidian does not index those, so embeds would not resolve.
+export const DEFAULT_PDF_FOLDER = "_pdfs";
+
 export const SYNC_INTERVALS: Record<string, number> = {
 	"Manual only": 0,
 	"Every 5 minutes": 5 * 60 * 1000,

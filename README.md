@@ -62,7 +62,7 @@ Ballpoint, Fineliner, Marker, Pencil, Mechanical Pencil, Calligraphy Pen, Paintb
 
 - Click the tablet icon in the Obsidian ribbon to sync
 - Or use the command palette: **reMarkable Sync: Sync now**
-- Documents are saved as PDFs in your configured vault subfolder
+- Each document becomes a note in your configured vault subfolder, embedding its PDF from the PDF folder (`_pdfs` by default); notes are created once and keep your edits
 - Enable auto-sync in settings for hands-free operation
 
 ## Configuration
@@ -70,6 +70,7 @@ Ballpoint, Fineliner, Marker, Pencil, Mechanical Pencil, Calligraphy Pen, Paintb
 | Setting | Default | Description |
 |---------|---------|-------------|
 | Sync folder | `reMarkable/` | Subfolder in your vault for synced documents |
+| PDF folder | `_pdfs` | Folder inside the sync folder holding the PDFs; each document gets a note in the sync folder (same folder hierarchy) that embeds its PDF |
 | Excluded folders | (none) | Comma-separated reMarkable folders (and their subfolders) to skip, e.g. `Archive, Work/Old` |
 | Auto-sync | Off | Sync automatically on a timer |
 | Sync interval | 5 min | How often to auto-sync |

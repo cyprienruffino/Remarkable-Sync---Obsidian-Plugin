@@ -14,14 +14,17 @@ import {
 	isDocument,
 } from "./cloud-client";
 import { convertDocument } from "./document-converter";
-import { SYNC_LOG_FILENAME, SYNC_LOG_MAX_BYTES } from "./constants";
+import { DEFAULT_PDF_FOLDER, SYNC_LOG_FILENAME, SYNC_LOG_MAX_BYTES } from "./constants";
 
 // --- Sync state ---
 
 export interface SyncedDocInfo {
 	/** Sub-file count at last sync (the root index has no real revision number). */
 	version: number;
+	/** Vault-relative path of the PDF. */
 	path: string;
+	/** Vault-relative path of the note embedding the PDF. Absent in state files from before notes. */
+	notePath?: string;
 	hash: string;
 	syncedAt: string;
 	/** Root-index entry hash; changes on any edit. Absent in state files from before entry-hash tracking. */
@@ -117,6 +120,15 @@ export function isInExcludedFolder(docPath: string, excluded: string[]): boolean
 	return excluded.some((folder) => docPath.startsWith(`${folder}/`));
 }
 
+interface DocPaths {
+	pdf: string;
+	note: string;
+}
+
+function noteEmbed(pdfVaultPath: string): string {
+	return `![[${pdfVaultPath}]]`;
+}
+
 export type ProgressCallback = (message: string) => void;
 
 // --- Sync manager ---
@@ -125,6 +137,8 @@ export interface SyncOptions {
 	folderFilter?: string;
 	/** reMarkable folder paths whose documents (including subfolders) are skipped. */
 	excludedFolders?: string[];
+	/** Folder inside the sync folder that holds the PDFs (default: DEFAULT_PDF_FOLDER). */
+	pdfFolder?: string;
 	force?: boolean;
 	dryRun?: boolean;
 	subfolder?: string;
@@ -248,10 +262,21 @@ export class SyncManager {
 
 		progress(`Found ${included.length} documents to check`);
 
+		const pdfFolder = normalizeFolderPath(opts.pdfFolder ?? "") || DEFAULT_PDF_FOLDER;
+
 		for (const doc of included) {
 			const docPath = folderPaths.get(doc.id) ?? doc.name;
+			const paths = this.docPaths(docPath, pdfFolder);
 
-			if (!opts.force && !this.state.needsSync(doc)) {
+			// A changed PDF folder setting or a state file from before notes moves
+			// files even when the document itself is unchanged.
+			const previous = this.state.syncedDocs[doc.id];
+			const relocated =
+				previous !== undefined &&
+				(previous.path !== this.toVaultRelative(paths.pdf) ||
+					previous.notePath !== this.toVaultRelative(paths.note));
+
+			if (!opts.force && !relocated && !this.state.needsSync(doc)) {
 				results.skipped.push(docPath);
 				continue;
 			}
@@ -263,7 +288,7 @@ export class SyncManager {
 			}
 
 			try {
-				await this.syncDocument(client, doc, docPath, progress);
+				await this.syncDocument(client, doc, docPath, paths, progress);
 				results.synced.push(docPath);
 				progress(`[OK] Synced: ${docPath}`);
 			} catch (e) {
@@ -339,6 +364,7 @@ export class SyncManager {
 		client: RemarkableCloudClient,
 		doc: DocumentMetadata,
 		docPath: string,
+		paths: DocPaths,
 		progress: ProgressCallback
 	): Promise<void> {
 		progress(`Downloading: ${docPath}...`);
@@ -347,30 +373,25 @@ export class SyncManager {
 		progress(`Converting: ${docPath}...`);
 		const pdfData = await convertDocument(doc.id, zipData);
 
-		// Sanitize path for Windows (backslash included: names must not create folders)
-		const safePath = docPath.replace(/[<>:"|?*\\]/g, "_");
-		const outputPath = joinPath(this.outputDir, safePath + ".pdf");
-
-		// Ensure parent directory exists
-		const parentDir = outputPath.substring(0, outputPath.lastIndexOf("/"));
-		if (parentDir) await this.fileOps.mkdir(parentDir);
+		await this.ensureParentDir(paths.pdf);
 
 		const hash = simpleHash(pdfData);
-		const relativePath = this.toVaultRelative(outputPath);
+		const pdfRel = this.toVaultRelative(paths.pdf);
+		const noteRel = this.toVaultRelative(paths.note);
 		const previous = this.state.syncedDocs[doc.id];
 
 		// Metadata-only changes re-render the same bytes; skip the write to spare
 		// vault watchers (Obsidian Sync, backups) a spurious mtime bump.
 		const unchanged =
 			previous?.hash === hash &&
-			previous?.path === relativePath &&
-			(await this.fileOps.exists(outputPath));
+			previous?.path === pdfRel &&
+			(await this.fileOps.exists(paths.pdf));
 		if (!unchanged) {
-			await this.fileOps.writeBinaryFile(outputPath, pdfData);
+			await this.fileOps.writeBinaryFile(paths.pdf, pdfData);
 		}
 
 		// A rename/move re-syncs to a new path; drop the stale PDF at the old one.
-		if (previous && previous.path !== relativePath) {
+		if (previous && previous.path !== pdfRel) {
 			const oldPath = joinPath(this.vaultPath, previous.path);
 			try {
 				if (await this.fileOps.exists(oldPath)) {
@@ -382,14 +403,73 @@ export class SyncManager {
 			}
 		}
 
+		await this.writeNote(previous, paths.note, noteRel, pdfRel, progress);
+
 		this.state.syncedDocs[doc.id] = {
 			version: doc.version,
-			path: relativePath,
+			path: pdfRel,
+			notePath: noteRel,
 			hash,
 			syncedAt: new Date().toISOString(),
 			entryHash: doc.entryHash,
 		};
 		await this.state.save(this.stateFile, this.fileOps);
+	}
+
+	/**
+	 * Create the note embedding the PDF. The note belongs to the user after
+	 * that: it is never overwritten, only moved along with the document and its
+	 * embed repointed when the PDF moves.
+	 */
+	private async writeNote(
+		previous: SyncedDocInfo | undefined,
+		notePath: string,
+		noteRel: string,
+		pdfRel: string,
+		progress: ProgressCallback
+	): Promise<void> {
+		const repoint = (content: string): string =>
+			previous ? content.split(noteEmbed(previous.path)).join(noteEmbed(pdfRel)) : content;
+
+		if (await this.fileOps.exists(notePath)) {
+			if (previous && previous.path !== pdfRel) {
+				const content = (await this.fileOps.readFile(notePath)) ?? "";
+				const updated = repoint(content);
+				if (updated !== content) await this.fileOps.writeFile(notePath, updated);
+			}
+			return;
+		}
+
+		await this.ensureParentDir(notePath);
+
+		const oldNote =
+			previous?.notePath && previous.notePath !== noteRel
+				? joinPath(this.vaultPath, previous.notePath)
+				: null;
+		if (oldNote && (await this.fileOps.exists(oldNote))) {
+			const content = (await this.fileOps.readFile(oldNote)) ?? "";
+			await this.fileOps.writeFile(notePath, repoint(content));
+			await this.fileOps.deleteFile(oldNote);
+			progress(`Moved note: ${previous!.notePath} -> ${noteRel}`);
+			return;
+		}
+
+		await this.fileOps.writeFile(notePath, noteEmbed(pdfRel) + "\n");
+	}
+
+	/** Where a document's note and PDF live, mirroring its reMarkable folder path. */
+	private docPaths(docPath: string, pdfFolder: string): DocPaths {
+		// Windows-invalid characters, plus the ones that break a wikilink embed.
+		const safePath = docPath.replace(/[<>:"|?*\\#^[\]]/g, "_");
+		return {
+			pdf: joinPath(this.outputDir, joinPath(pdfFolder, safePath + ".pdf")),
+			note: joinPath(this.outputDir, safePath + ".md"),
+		};
+	}
+
+	private async ensureParentDir(filePath: string): Promise<void> {
+		const parentDir = filePath.substring(0, filePath.lastIndexOf("/"));
+		if (parentDir) await this.fileOps.mkdir(parentDir);
 	}
 
 	/** Strip the vault prefix so state paths stay portable across vault locations. */
